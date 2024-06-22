@@ -117,6 +117,7 @@ def init_distributed_mode(args):
         args.gpu = int(os.environ['LOCAL_RANK'])
     elif 'SLURM_PROCID' in os.environ:
         args.rank = int(os.environ['SLURM_PROCID'])
+        args.world_size = int(os.environ['SLURM_NTASKS'])
         args.gpu = args.rank % torch.cuda.device_count()
     else:
         print('Not using distributed mode')
@@ -504,11 +505,13 @@ def eval_train(epoch, model, eval_loader, CE):
             sys.stdout.flush()
 
     # Convert lists to tensors for efficient gathering
+    print('got to this line local_losses_tensor = torch.tensor(local_losses).cuda()')
     local_losses_tensor = torch.tensor(local_losses).cuda()
     local_ys_tensor = torch.tensor(local_ys).cuda()
     #local_paths_tensor = torch.tensor(local_paths).cuda()  # This assumes paths can be converted to tensor
-
-    # Gathering all data from all GPUs
+    print('got to dist_barrier')
+    dist.barrier()
+    
     global_losses = gather_all_data_tensor(local_losses_tensor).cpu().numpy()
     global_ys = gather_all_data_tensor(local_ys_tensor).cpu().numpy()
 
@@ -911,12 +914,13 @@ def main(args):
             )  # evaluate training data loss for next epoch
             prob1, paths1 = eval_train(epoch, net1, eval_loader, CE)
             print("\n==== net 2 evaluate next epoch training data loss ====")
-            eval_loader = loader.run("eval_train", num_classes=args.num_class)
+            eval_loader2 = loader.run("eval_train", num_classes=args.num_class)
             if args.use_gnn:
                 prob2, paths2 = eval_train_gnn(net2, CE, args, epoch, loader)
-            prob2, paths2 = eval_train(epoch, net2, eval_loader, CE)
+            prob2, paths2 = eval_train(epoch, net2, eval_loader2, CE)
             # Serialize prob1
             prob1 = prob1
+            prob2 = prob2
             print('paths1')
             print(len(paths1))
             print('probs1')
