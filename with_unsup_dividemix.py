@@ -485,38 +485,31 @@ def test(net1, net2, test_loader):
 
 #     return prob, global_paths
 
-def eval_train(epoch, model, eval_loader, CE):
+def eval_train(epoch, model, eval_loader, CE, args):
     model.eval()
-    local_losses = []
-    local_ys = []
-    local_paths = []
+    local_losses, local_ys, local_paths = [], [], []
 
     with torch.no_grad():
         for batch_idx, (inputs, targets, paths) in enumerate(eval_loader):
             inputs, targets = inputs.cuda(), targets.cuda()
             outputs = model(inputs)
             loss = CE(outputs, targets)
+            
             local_losses.extend(loss.cpu().numpy())
             local_ys.extend(targets.cpu().numpy())
             local_paths.extend(paths)
             
-            sys.stdout.write("\r")
-            sys.stdout.write("| Evaluating loss Iter %3d\t" % (batch_idx))
+            sys.stdout.write(f"\r| Evaluating loss Iter {batch_idx:3d}\t")
             sys.stdout.flush()
 
     # Convert lists to tensors for efficient gathering
-    print('got to this line local_losses_tensor = torch.tensor(local_losses).cuda()')
     local_losses_tensor = torch.tensor(local_losses).cuda()
     local_ys_tensor = torch.tensor(local_ys).cuda()
-    #local_paths_tensor = torch.tensor(local_paths).cuda()  # This assumes paths can be converted to tensor
-    print('got to dist_barrier')
     dist.barrier()
     
     global_losses = gather_all_data_tensor(local_losses_tensor).cpu().numpy()
     global_ys = gather_all_data_tensor(local_ys_tensor).cpu().numpy()
-
-    # Gathering all string data from all GPUs
-    global_paths = gather_all_data_strings(local_paths) 
+    global_paths = gather_all_data_strings(local_paths)  # Gathering all string data from all GPUs
 
     # Debugging output to verify lengths
     print(f"Length of global_losses: {len(global_losses)}")
@@ -529,28 +522,33 @@ def eval_train(epoch, model, eval_loader, CE):
     if epoch < args.class_cond_epoch:
         for y in set(global_ys):
             idx = global_ys == y
-            if idx.sum() == 1:
+            print(f"Class {y}: {idx.sum()} samples")  # Debugging statement
+            if idx.sum() < 2:  # Check if there are fewer than 2 samples
                 prob[idx] = 0
                 continue
-            curr_losses = (global_losses[idx] - global_losses[idx].min()) / (
-                global_losses[idx].max() - global_losses[idx].min() + 1e-8
-            )
+
+            curr_losses = global_losses[idx]
+            curr_losses = (curr_losses - curr_losses.min()) / (curr_losses.max() - curr_losses.min() + 1e-8)
             curr_losses = curr_losses.reshape(-1, 1)
-            gmm = GaussianMixture(
-                        n_components=2, max_iter=10, reg_covar=5e-4, tol=1e-2)
+            
+            gmm = GaussianMixture(n_components=2, max_iter=10, reg_covar=5e-4, tol=1e-2)
             gmm.fit(curr_losses)
             curr_prob = gmm.predict_proba(curr_losses)
             prob[idx] = curr_prob[:, gmm.means_.argmin()]
     else:
-        global_losses = (global_losses - global_losses.min()) / (global_losses.max() - global_losses.min())
-        global_losses = global_losses.reshape(-1, 1)
-        gmm = GaussianMixture(
-                        n_components=2, max_iter=15, reg_covar=5e-4, tol=1e-2)
-        gmm.fit(global_losses)
-        prob = gmm.predict_proba(global_losses)
-        prob = prob[:, gmm.means_.argmin()]
+        if len(global_losses) >= 2:  # Check if there are at least 2 samples
+            global_losses = (global_losses - global_losses.min()) / (
+                global_losses.max() - global_losses.min()
+            ).reshape(-1, 1)
+            
+            gmm = GaussianMixture(n_components=2, max_iter=15, reg_covar=5e-4, tol=1e-2)
+            gmm.fit(global_losses)
+            prob = gmm.predict_proba(global_losses)[:, gmm.means_.argmin()]
+        else:
+            prob = np.zeros(len(global_losses))  # Default to zero probabilities if fewer than 2 samples
 
     return prob, global_paths
+
 
 
 # def gather_all_data(local_data):
@@ -912,12 +910,12 @@ def main(args):
             eval_loader = loader.run(
                 "eval_train", num_classes=args.num_class
             )  # evaluate training data loss for next epoch
-            prob1, paths1 = eval_train(epoch, net1, eval_loader, CE)
+            prob1, paths1 = eval_train(epoch, net1, eval_loader, CE, args)
             print("\n==== net 2 evaluate next epoch training data loss ====")
-            eval_loader2 = loader.run("eval_train", num_classes=args.num_class)
+            eval_loader = loader.run("eval_train", num_classes=args.num_class)
             if args.use_gnn:
                 prob2, paths2 = eval_train_gnn(net2, CE, args, epoch, loader)
-            prob2, paths2 = eval_train(epoch, net2, eval_loader2, CE)
+            prob2, paths2 = eval_train(epoch, net2, eval_loader, CE, args)
             # Serialize prob1
             prob1 = prob1
             prob2 = prob2
